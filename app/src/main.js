@@ -1,4 +1,8 @@
 // The editor: wires the controls to the cover state and redraws the live preview.
+// Pick photos (upload, drag-and-drop, or the bundled samples), click a panel to select it,
+// drag on the canvas to reposition its crop, scroll or use the slider to zoom, choose a
+// layout and a colour grade, edit the caption, then export a PNG at a poster size.
+// A ?shot= query sets up a fixed scene for screenshots instead (./shots.js).
 import { createState, drawCover, panelRects, LAYOUTS, GRADES } from './cover.js';
 import { runShot } from './shots.js';
 
@@ -7,6 +11,7 @@ const canvas = $('cover');
 const state = createState();
 let shotMode = false;
 
+/** Loads an image from a URL, resolving to the image once it can be drawn. */
 export function loadImage(url) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -24,14 +29,16 @@ function redraw() {
   syncControls();
 }
 
+// In the editor only: outline the selected panel so it is clear which crop drags and the
+// zoom slider will move.
 function drawSelection() {
   const rects = panelRects(state.width, state.height, state.layout);
   const r = rects[state.selected];
   if (!r) return;
   const ctx = canvas.getContext('2d');
   ctx.save();
-  ctx.strokeStyle = '#ff1a8c';
-  ctx.lineWidth = Math.max(4, state.width * 0.006);
+  ctx.strokeStyle = '#ff2e88';
+  ctx.lineWidth = Math.max(4, state.width * 0.005);
   ctx.setLineDash([state.width * 0.02, state.width * 0.012]);
   ctx.strokeRect(r.x, r.y, r.w, r.h);
   ctx.restore();
@@ -42,14 +49,11 @@ function syncControls() {
     b.classList.toggle('active', b.dataset.layout === state.layout));
   document.querySelectorAll('[data-grade]').forEach((b) =>
     b.classList.toggle('active', b.dataset.grade === state.grade));
-  if ($('zoom')) $('zoom').value = state.slots[state.selected].zoom;
-  if ($('fillall')) $('fillall').checked = state.fillAll;
-  if ($('comic')) $('comic').checked = state.comicEffect;
-  if ($('logo')) $('logo').checked = state.showLogo;
-  if ($('badge')) $('badge').checked = state.showBadge;
-  if ($('panel-label')) {
-    $('panel-label').textContent = `Panel ${state.selected + 1} of ${LAYOUTS[state.layout].cells.length}`;
-  }
+  document.querySelectorAll('[data-size]').forEach((b) =>
+    b.classList.toggle('active', b.dataset.size === `${state.width}x${state.height}`));
+  $('zoom').value = state.slots[state.selected].zoom;
+  $('fillall').checked = state.fillAll;
+  $('panel-label').textContent = `Panel ${state.selected + 1} of ${LAYOUTS[state.layout].cells.length}`;
 }
 
 function assignPhoto(img) {
@@ -84,6 +88,7 @@ $('photo-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
+// Drag-and-drop anywhere on the stage adds the photo and assigns it.
 const stage = $('stage');
 ['dragover', 'dragleave', 'drop'].forEach((name) =>
   stage.addEventListener(name, (e) => {
@@ -106,31 +111,16 @@ document.querySelectorAll('[data-grade]').forEach((b) =>
   b.addEventListener('click', () => { state.grade = b.dataset.grade; redraw(); }));
 
 $('fillall').addEventListener('change', (e) => { state.fillAll = e.target.checked; redraw(); });
-if ($('comic')) $('comic').addEventListener('change', (e) => { state.comicEffect = e.target.checked; redraw(); });
-if ($('logo')) $('logo').addEventListener('change', (e) => { state.showLogo = e.target.checked; redraw(); });
-if ($('badge')) $('badge').addEventListener('change', (e) => { state.showBadge = e.target.checked; redraw(); });
-
 $('caption').addEventListener('input', (e) => { state.caption = e.target.value; redraw(); });
 $('subtitle').addEventListener('input', (e) => { state.subtitle = e.target.value; redraw(); });
 $('pos').addEventListener('change', (e) => { state.captionPos = e.target.value; redraw(); });
-
-document.querySelectorAll('.preset-btn').forEach((b) => {
+document.querySelectorAll('[data-size]').forEach((b) =>
   b.addEventListener('click', () => {
-    const [cap, sub] = b.dataset.preset.split('|');
-    state.caption = cap;
-    state.subtitle = sub;
-    $('caption').value = cap;
-    $('subtitle').value = sub;
+    const [w, h] = b.dataset.size.split('x').map(Number);
+    state.width = w;
+    state.height = h;
     redraw();
-  });
-});
-
-$('size').addEventListener('change', (e) => {
-  const [w, h] = e.target.value.split('x').map(Number);
-  state.width = w;
-  state.height = h;
-  redraw();
-});
+  }));
 $('zoom').addEventListener('input', (e) => {
   state.slots[state.selected].zoom = Number(e.target.value);
   redraw();
@@ -141,6 +131,40 @@ $('clear-panel').addEventListener('click', () => {
   redraw();
 });
 
+// Shuffle: give every panel a fresh, plausible crop at once — a fast way out of the
+// default framing when one photo fills the whole poster.
+$('shuffle').addEventListener('click', () => {
+  const count = LAYOUTS[state.layout].cells.length;
+  for (let i = 0; i < count; i++) {
+    const slot = state.slots[i];
+    slot.panX = Math.round((Math.random() * 1.7 - 0.85) * 100) / 100;
+    slot.panY = Math.round((Math.random() * 1.7 - 0.85) * 100) / 100;
+    slot.zoom = Math.round((1.05 + Math.random() * 0.75) * 100) / 100;
+  }
+  redraw();
+  $('status').textContent = 'Shuffled the panel crops';
+});
+
+// Keyboard nudging: with a panel selected (and focus not in a text field), the arrow
+// keys shift its crop and +/- zoom it, for finer control than dragging. Shift steps
+// further. The arrow direction follows the view: Right reveals more of the photo's
+// right side.
+window.addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea')) return;
+  const slot = state.slots[state.selected];
+  const step = e.shiftKey ? 0.1 : 0.025;
+  if (e.key === 'ArrowRight') slot.panX = clamp(slot.panX + step);
+  else if (e.key === 'ArrowLeft') slot.panX = clamp(slot.panX - step);
+  else if (e.key === 'ArrowDown') slot.panY = clamp(slot.panY + step);
+  else if (e.key === 'ArrowUp') slot.panY = clamp(slot.panY - step);
+  else if (e.key === '+' || e.key === '=') slot.zoom = Math.min(3, slot.zoom + 0.05);
+  else if (e.key === '-' || e.key === '_') slot.zoom = Math.max(1, slot.zoom - 0.05);
+  else return;
+  e.preventDefault();
+  redraw();
+});
+
+// Pointer work on the canvas: click selects a panel, drag pans its crop, wheel zooms it.
 function canvasPoint(e) {
   const r = canvas.getBoundingClientRect();
   return {
@@ -201,12 +225,14 @@ $('export').addEventListener('click', () => {
   out.toBlob((blob) => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `gta6-cover-${state.width}x${state.height}.png`;
+    a.download = `cover-${state.width}x${state.height}.png`;
     a.click();
-    $('status').textContent = `Saved gta6-cover-${state.width}x${state.height}.png`;
+    $('status').textContent = `Saved cover-${state.width}x${state.height}.png`;
   }, 'image/png');
 });
 
+// Applies a ?shot= scene: loads the sample into slot 1 (filling every panel), sets the
+// requested layout/grade/caption/size, and for ?shot=cover hides the UI entirely.
 async function applyShot(shot, q) {
   shotMode = true;
   const img = await loadImage(`samples/${q.get('photo') ?? 'pier'}.jpg`);
@@ -217,10 +243,6 @@ async function applyShot(shot, q) {
   if (q.get('layout') && LAYOUTS[q.get('layout')]) state.layout = q.get('layout');
   if (q.get('grade') && GRADES[q.get('grade')]) state.grade = q.get('grade');
   if (q.get('pos')) state.captionPos = q.get('pos');
-  if (q.get('comic')) state.comicEffect = q.get('comic') !== '0';
-  if (q.get('logo')) state.showLogo = q.get('logo') !== '0';
-  if (q.get('badge')) state.showBadge = q.get('badge') !== '0';
-
   const size = /^(\d+)x(\d+)$/.exec(q.get('size') ?? '');
   if (size) { state.width = Number(size[1]); state.height = Number(size[2]); }
   $('caption').value = state.caption;
@@ -234,6 +256,7 @@ const shot = new URLSearchParams(location.search).get('shot');
 if (shot) {
   runShot(shot, new URLSearchParams(location.search), applyShot);
 } else {
+  // Start on the pier sample so the first thing seen is a finished-looking cover.
   loadImage('samples/pier.jpg').then((img) => {
     state.slots[0].img = img;
     redraw();
