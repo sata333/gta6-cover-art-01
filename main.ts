@@ -14,7 +14,7 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-app.ts';
@@ -41,4 +41,53 @@ writeFileSync(
     app_max_bytes: 50331648,
     app_path_max_bytes: 1000,
   }),
+);
+
+// A pre-flight check of what was just handed in, against the gate's screenshot limits
+// (3-4 shots, each at most 256 KiB, long side at most 1280 px, short side at least
+// 480 px). It only reads the copied files and logs: the dossier above is already
+// written and nothing here can change its bytes, so repeat runs stay identical.
+function imageSize(buf) {
+  // PNG: the IHDR width and height sit at bytes 16 and 20, big-endian.
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  // JPEG: walk the marker segments until a start-of-frame marker (C0-C2) turns up;
+  // its payload is precision (1 byte), height (2), width (2).
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) { i += 1; continue; }
+      const marker = buf[i + 1];
+      if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+        return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5) };
+      }
+      if (marker === 0xd9 || marker === 0xda) break;
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
+const shotDir = join(out, 'screenshots');
+const shots = existsSync(shotDir) ? readdirSync(shotDir).sort() : [];
+const problems = [];
+if (shots.length < 3 || shots.length > 4) problems.push(`expected 3-4 screenshots, found ${shots.length}`);
+let shotBytes = 0;
+for (const name of shots) {
+  const path = join(shotDir, name);
+  const bytes = statSync(path).size;
+  shotBytes += bytes;
+  if (bytes > 262144) problems.push(`${name} is ${bytes} bytes, over the 256 KiB cap`);
+  const size = imageSize(readFileSync(path));
+  if (!size) { problems.push(`${name}: dimensions not readable`); continue; }
+  const long = Math.max(size.width, size.height);
+  const short = Math.min(size.width, size.height);
+  if (long > 1280) problems.push(`${name} is ${size.width}x${size.height}, long side over 1280`);
+  if (short < 480) problems.push(`${name} is ${size.width}x${size.height}, short side under 480`);
+}
+for (const problem of problems) console.log(`gta6-cover-art-01: WARNING ${problem}`);
+console.log(
+  `gta6-cover-art-01: handed in ${shots.length} screenshot(s), ${shotBytes} bytes in all; ` +
+  (problems.length ? `${problems.length} problem(s) found` : 'all within the gate limits'),
 );
